@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>PDF 학생 정보 추출기 (라벨-크롭 디코딩 개선판)</title>
+
+<!-- PDF.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+</script>
+
+<!-- jsQR -->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+
+<style>
+  :root { --primary:#3478f6; --bg:#f6f7fb; --card:#fff; --muted:#8b95a1; --ok:#22c55e; --warn:#f59e0b; }
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Apple SD Gothic Neo,Noto Sans KR,Helvetica,Arial,sans-serif;background:var(--bg);margin:0}
+  .container{max-width:1200px;margin:0 auto;padding:24px}
+  .card{background:var(--card);border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.06);padding:28px}
+  h1{margin:0 0 16px;font-size:22px}
+  .upload{border:2px dashed var(--primary);border-radius:14px;padding:28px;text-align:center;background:#eef3ff;cursor:pointer}
+  .upload.dragover{background:#e6f4ea;border-color:#22c55e}
+  input[type=file]{display:none}
+  .btn{background:var(--primary);color:#fff;border:0;border-radius:10px;padding:12px 18px;cursor:pointer;font-weight:600}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.secondary{background:#111827}
+  .btn.ghost{background:#eef2f7;color:#111827}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center;margin-top:12px}
+  .progress{height:10px;background:#edf2ff;border-radius:99px;overflow:hidden;margin:14px 0;display:none}
+  .progress>div{height:100%;width:0%;background:linear-gradient(90deg,#60a5fa,#6366f1);transition:width .25s ease}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:18px 0}
+  .stat{background:#111827;color:#fff;border-radius:12px;padding:16px}
+  .stat .big{font-size:28px;font-weight:800}
+  .hidden{display:none}
+  .table-wrap{overflow:auto;border-radius:12px;border:1px solid #e5e7eb;background:#fff}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:10px 12px;border-bottom:1px solid #f1f5f9;text-align:left;vertical-align:top}
+  th{background:#0f172a;color:#fff;position:sticky;top:0}
+  tr:hover td{background:#fafafa}
+  .muted{color:var(--muted)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
+  .log{background:#0b1220;color:#d1d5db;border-radius:12px;padding:12px;height:220px;overflow:auto;white-space:pre-wrap;font-size:12px}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:#eef2ff;color:#111827;font-size:12px}
+  .ok{color:#16a34a}
+  .warn{color:#d97706}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media (max-width:900px){.grid{grid-template-columns:1fr}}
+  canvas.debug{max-width:100%;border:1px solid #e5e7eb;border-radius:10px}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="card">
+    <h1>📄 PDF 학생 정보 추출기 (고정밀 라벨-크롭 디코딩)</h1>
+    <div class="upload" id="drop" onclick="fileInput.click()">
+      <div><strong>PDF 파일을 선택</strong>하거나 여기로 드래그하세요.</div>
+      <div class="muted">학번·이름 텍스트와 QR이 같은 격자로 배치된 PDF에 최적화</div>
+      <input id="fileInput" type="file" accept="application/pdf"/>
+    </div>
+
+    <div class="row">
+      <button id="run" class="btn" disabled>데이터 추출</button>
+      <button id="toggleLog" class="btn ghost">로그 보기</button>
+      <button id="toggleDebug" class="btn ghost">디버그 캔버스</button>
+    </div>
+
+    <div class="progress" id="prog"><div id="bar"></div></div>
+
+    <div id="debugWrap" class="hidden grid">
+      <div>
+        <div class="pill mono">렌더 캔버스</div>
+        <canvas id="pageCanvas" class="debug"></canvas>
+      </div>
+      <div>
+        <div class="pill mono">크롭 미리보기</div>
+        <canvas id="cropCanvas" class="debug"></canvas>
+      </div>
+    </div>
+
+    <div id="log" class="log hidden"></div>
+
+    <div id="results" class="hidden">
+      <div class="stats">
+        <div class="stat"><div class="big" id="statTotal">0</div>총 학생 수</div>
+        <div class="stat"><div class="big" id="statUrls">0</div>QR 디코딩 성공</div>
+        <div class="stat"><div class="big" id="statTime">0</div>처리 시간(초)</div>
+      </div>
+
+      <div class="row">
+        <button class="btn secondary" id="exportCSV">CSV로 내보내기</button>
+        <button class="btn secondary" id="exportJSON">JSON으로 내보내기</button>
+      </div>
+
+      <div class="table-wrap" style="margin-top:12px">
+        <table id="table">
+          <thead>
+            <tr>
+              <th style="width:80px">번호</th>
+              <th style="width:120px">학번</th>
+              <th style="width:120px">이름</th>
+              <th>QR URL</th>
+              <th style="width:90px">페이지</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = sel => document.querySelector(sel);
+const $$ = sel => Array.from(document.querySelectorAll(sel));
+
+let selectedFile = null;
+let extracted = [];
+
+const logEl = $('#log');
+const prog = $('#prog'); const bar = $('#bar');
+
+function log(msg){
+  const t = new Date().toLocaleTimeString();
+  logEl.textContent += `[${t}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(msg);
+}
+
+function setProgress(p){
+  prog.style.display = 'block';
+  bar.style.width = `${p}%`;
+  if (p >= 100) setTimeout(()=>prog.style.display='none', 800);
+}
+
+// --- 드래그&드롭 / 파일 선택 ---
+const drop = $('#drop');
+const fileInput = $('#fileInput');
+drop.addEventListener('dragover', e=>{e.preventDefault(); drop.classList.add('dragover')});
+drop.addEventListener('dragleave', ()=>drop.classList.remove('dragover'));
+drop.addEventListener('drop', e=>{
+  e.preventDefault(); drop.classList.remove('dragover');
+  const f = e.dataTransfer.files?.[0];
+  if (f && f.type === 'application/pdf'){ selectedFile = f; $('#run').disabled = false; drop.innerHTML = `✅ ${f.name}`; log(`선택: ${f.name} ${(f.size/1024/1024).toFixed(2)} MB`) }
+});
+
+fileInput.addEventListener('change', e=>{
+  const f = e.target.files?.[0];
+  if (f && f.type === 'application/pdf'){ selectedFile = f; $('#run').disabled = false; drop.innerHTML = `✅ ${f.name}`; log(`선택: ${f.name} ${(f.size/1024/1024).toFixed(2)} MB`) }
+});
+
+$('#toggleLog').onclick=()=> logEl.classList.toggle('hidden');
+$('#toggleDebug').onclick=()=> $('#debugWrap').classList.toggle('hidden');
+
+// --- 좌표/텍스트 유틸 ---
+function pdfToCanvasPoint(x, y, viewport){
+  const m = viewport.transform; // [a,b,c,d,e,f]
+  return { x: x * m[0] + m[4], y: y * m[3] + m[5] };
+}
+
+// 라벨(학번+이름) 찾기: 같은 라인의 두 토큰 붙이기
+function groupStudentLabels(textItems, viewport){
+  // token 후보: 학번(5자리) 또는 공백 없는 문자열
+  const isId = s => /^\d{5}$/.test(s);
+  const isName = s => /^\S+$/.test(s);
+
+  const tokens = textItems
+    .map(it=>({ text: it.str.trim(), x: it.transform[4], y: it.transform[5] }))
+    .filter(it=> isId(it.text) || isName(it.text));
+
+  // y기준으로 줄 묶기(가까운 y는 같은 라인)
+  tokens.sort((a,b)=> b.y - a.y);
+  const lines=[]; const tolY=3;
+  tokens.forEach(t=>{
+    const line = lines.find(L => Math.abs(L.y - t.y) < tolY);
+    if (line){ line.items.push(t); line.y=(line.y+t.y)/2 }
+    else lines.push({ y:t.y, items:[t] });
+  });
+
+  const labels=[];
+  lines.forEach(L=>{
+    L.items.sort((a,b)=> a.x - b.x);
+    for (let i=0;i<L.items.length-1;i++){
+      const A=L.items[i], B=L.items[i+1];
+      if (isId(A.text) && !isId(B.text) && isName(B.text)){
+        const pA = pdfToCanvasPoint(A.x,A.y,viewport);
+        const pB = pdfToCanvasPoint(B.x,B.y,viewport);
+        const x0=Math.min(pA.x,pB.x), x1=Math.max(pA.x,pB.x);
+        const y0=Math.min(pA.y,pB.y), y1=Math.max(pA.y,pB.y);
+        labels.push({
+          sid:A.text, name:B.text,
+          bbox:{x0,y0,x1,y1}, cx:(x0+x1)/2, cy:(y0+y1)/2
+        });
+      }
+    }
+  });
+
+  return labels;
+}
+
+// 캔버스에서 라벨 아래 영역을 크롭(정사각)
+function cropBelowLabel(ctx, label, opts){
+  const { padX=40, padY=12, size=260, clampW, clampH } = opts || {};
+  let x = Math.max(0, Math.round(label.bbox.x0 - padX));
+  let y = Math.max(0, Math.round(label.bbox.y1 + padY));
+  const w = Math.min(size, clampW - x);
+  const h = Math.min(size, clampH - y);
+  if (w <= 10 || h <= 10) return null;
+  const img = ctx.getImageData(x,y,w,h);
+  return { img, x, y, w, h };
+}
+
+// 간단한 이진화로 대비 향상
+function binarize(imgData, thr){
+  const d = imgData.data;
+  for (let i=0;i<d.length;i+=4){
+    const v = (d[i] + d[i+1] + d[i+2]) / 3;
+    const b = v > thr ? 255 : 0;
+    d[i]=d[i+1]=d[i+2]=b;
+  }
+  return imgData;
+}
+
+function decodeWithJsQR(imgData){
+  const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts:"attemptBoth" });
+  return code?.data || "";
+}
+
+// 실패 라벨만 재시도(스케일 업 + 다른 임계값)
+async function retryFailed(page, viewportBase, failed, baseScale){
+  const scales = [baseScale*1.5, baseScale*2.0];
+  const thresholds = [128, 160, 100];
+
+  for (const scale of scales){
+    const viewport = page.getViewport({ scale });
+    // 렌더 1회
+    const cvs=document.createElement('canvas'), ctx=cvs.getContext('2d');
+    cvs.width=viewport.width; cvs.height=viewport.height;
+    await page.render({ canvasContext:ctx, viewport }).promise;
+
+    for (const f of failed.filter(x=>!x.decoded)){
+      const labelScaled = {
+        bbox:{
+          x0: f.label.bbox.x0 * (scale/baseScale),
+          y0: f.label.bbox.y0 * (scale/baseScale),
+          x1: f.label.bbox.x1 * (scale/baseScale),
+          y1: f.label.bbox.y1 * (scale/baseScale),
+        }
+      };
+      const crop = cropBelowLabel(ctx, labelScaled, { size: 320, padX: 50, padY: 16, clampW:cvs.width, clampH:cvs.height });
+      if (!crop) continue;
+
+      // 임계값 여러 개로 시도
+      let out = decodeWithJsQR(crop.img);
+      if (!out){
+        for (const thr of thresholds){
+          const bin = new ImageData(new Uint8ClampedArray(crop.img.data), crop.img.width, crop.img.height);
+          binarize(bin, thr);
+          out = decodeWithJsQR(bin);
+          if (out) break;
+        }
+      }
+      if (out) f.decoded = out;
+    }
+    // 모두 해결됐으면 조기 종료
+    if (failed.every(x=>x.decoded)) break;
+  }
+}
+
+// 메인 추출
+async function extract(){
+  if (!selectedFile){ alert('PDF 파일을 먼저 선택하세요.'); return; }
+  $('#run').disabled = true; extracted = []; $('#results').classList.add('hidden');
+  const t0 = performance.now();
+  try{
+    log('문서 로딩…');
+    const buf = await selectedFile.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data:buf }).promise;
+    log(`총 ${pdf.numPages} 페이지`);
+
+    let total=0, okCount=0;
+
+    for (let pn=1; pn<=pdf.numPages; pn++){
+      setProgress( (pn-1)/pdf.numPages*90 );
+      log(`\n▶ 페이지 ${pn} 처리 시작`);
+
+      const page = await pdf.getPage(pn);
+      const baseScale = 2.0;
+      const viewport = page.getViewport({ scale: baseScale });
+
+      // 렌더 1회
+      const pageCanvas = $('#pageCanvas'), pctx = pageCanvas.getContext('2d');
+      pageCanvas.width = viewport.width; pageCanvas.height = viewport.height;
+      await page.render({ canvasContext: pctx, viewport }).promise;
+
+      // 텍스트 → 라벨(학번+이름) 추출
+      const text = await page.getTextContent();
+      const labels = groupStudentLabels(text.items, viewport);
+      log(`라벨 감지: ${labels.length}개`);
+
+      // 라벨별 크롭 후 jsQR 디코딩
+      const failed = [];
+      for (const label of labels){
+        const crop = cropBelowLabel(pctx, label, { clampW: pageCanvas.width, clampH: pageCanvas.height });
+        let decoded = "";
+        if (crop){
+          // 원본
+          decoded = decodeWithJsQR(crop.img);
+          // 실패 시 이진화 빠른 재시도(한 번)
+          if (!decoded){
+            const bin = new ImageData(new Uint8ClampedArray(crop.img.data), crop.img.width, crop.img.height);
+            binarize(bin, 140);
+            decoded = decodeWithJsQR(bin);
+          }
+
+          // 디버그: 첫 페이지 일부 크롭 미리보기
+          if (pn===1 && total<3){
+            const c = $('#cropCanvas'), cctx = c.getContext('2d');
+            c.width=crop.w; c.height=crop.h; cctx.putImageData(crop.img,0,0);
+          }
+        }
+
+        if (!decoded){
+          failed.push({ label, decoded:"" });
+        }else{
+          okCount++;
+        }
+
+        extracted.push({ 번호: ++total, 학번: label.sid, 이름: label.name, QR_URL: decoded || "", 페이지: pn });
+      }
+
+      // 실패 라벨만 스케일업/다중 임계값으로 재시도
+      if (failed.length){
+        log(`재시도 대상: ${failed.length}개 (스케일업/이진화)`);
+        await retryFailed(page, viewport, failed, baseScale);
+
+        // 반영
+        for (const f of failed){
+          if (f.decoded){
+            okCount++;
+            const row = extracted.find(r => r.페이지===pn && r.학번===f.label.sid && r.이름===f.label.name);
+            if (row) row.QR_URL = f.decoded;
+          }
+        }
+      }
+
+      log(`페이지 ${pn} 완료 ⎯ 성공: ${extracted.filter(x=>x.페이지===pn && x.QR_URL).length} / 라벨: ${labels.length}`);
+    }
+
+    setProgress(100);
+
+    // 결과 표시
+    $('#results').classList.remove('hidden');
+    $('#statTotal').textContent = extracted.length;
+    $('#statUrls').textContent = extracted.filter(r=>r.QR_URL).length;
+    $('#statTime').textContent = ((performance.now()-t0)/1000).toFixed(2);
+
+    const tbody = $('#tbody'); tbody.innerHTML = "";
+    for (const r of extracted){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${r.번호}</td>
+        <td class="mono">${r.학번}</td>
+        <td>${r.이름}</td>
+        <td>${r.QR_URL ? `<a href="${r.QR_URL}" target="_blank" class="mono">${r.QR_URL}</a>` : '<span class="muted">-</span>'}</td>
+        <td>${r.페이지}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+
+    log(`\n✅ 전체 완료: 총 ${extracted.length}명, 디코딩 ${extracted.filter(r=>r.QR_URL).length}건`);
+
+  }catch(err){
+    console.error(err);
+    log(`❌ 오류: ${err.message}`);
+    alert(`오류: ${err.message}`);
+  }finally{
+    $('#run').disabled = false;
+  }
+}
+
+// --- 내보내기 ---
+function exportCSV(){
+  if (!extracted.length) return alert('데이터가 없습니다.');
+  const headers = ['번호','학번','이름','QR_URL','페이지'];
+  const rows = extracted.map(r => `${r.번호},${r.학번},${r.이름},"${r.QR_URL||''}",${r.페이지}`);
+  const blob = new Blob(['\uFEFF'+[headers.join(','), ...rows].join('\n')], {type:'text/csv;charset=utf-8;'});
+  const a = document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download = `학생정보_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+}
+function exportJSON(){
+  if (!extracted.length) return alert('데이터가 없습니다.');
+  const blob = new Blob([JSON.stringify(extracted,null,2)], {type:'application/json'});
+  const a = document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download = `학생정보_${new Date().toISOString().slice(0,10)}.json`; a.click();
+}
+
+// --- 바인딩 ---
+$('#run').onclick = extract;
+$('#exportCSV').onclick = exportCSV;
+$('#exportJSON').onclick = exportJSON;
+
+// 초기 로그
+document.addEventListener('DOMContentLoaded', ()=>{
+  log('🚀 로드 완료: PDF.js + jsQR');
+  log('ℹ️ 라벨(학번+이름) 아래만 크롭하여 jsQR로 디코딩합니다.');
+});
+</script>
+</body>
+</html>
